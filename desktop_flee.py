@@ -34,7 +34,7 @@ import objc
 
 # ── Tuning ──────────────────────────────────────────────────────────────
 FLEE_RADIUS = 180
-FLEE_SPEED = 18
+FLEE_SPEED = 8
 RETURN_SPEED = 4
 ICON_SIZE = 64
 ICON_HALF = ICON_SIZE // 2
@@ -100,7 +100,9 @@ def get_desktop_icons():
             "name": str(title) if title else "?",
             "x": float(pt.x), "y": float(pt.y),
             "ox": float(pt.x), "oy": float(pt.y),
-            "fleeing": False, "frame": 0, "angle": 0.0,
+            "fleeing": False, "was_fleeing": False,
+            "frame": 0, "angle": 0.0,
+            "pop_t": 0.0,  # 0→1 over pop-in frames
             "sprite": None,
         })
     return icons
@@ -164,65 +166,217 @@ def crop_sprite(cg_img, icon, scale):
 
 
 # ── Drawing helpers ─────────────────────────────────────────────────────
-def draw_limb(x1, y1, x2, y2, hand=True):
+SKIN = None    # peach skin tone, set at init
+SHOE = None    # dark red shoe color
+WHITE = None
+
+UPPER_ARM = 10
+FOREARM = 9
+THIGH = 13
+SHIN = 11
+
+
+def _stroke_seg(x1, y1, x2, y2, width):
+    """Draw a single limb segment with outline."""
     path = NSBezierPath.bezierPath()
     path.moveToPoint_((x1, y1))
     path.lineToPoint_((x2, y2))
-    path.setLineCapStyle_(1)
-    NSColor.whiteColor().set()
-    path.setLineWidth_(LIMB_W + 3)
-    path.stroke()
+    path.setLineCapStyle_(1)  # round
     DARK.set()
-    path.setLineWidth_(LIMB_W)
+    path.setLineWidth_(width + 1.5)
     path.stroke()
-    r = 3.5 if hand else 4.5
+    SKIN.set()
+    path.setLineWidth_(width)
+    path.stroke()
+
+
+def _joint_dot(x, y, r):
+    oval = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(x - r, y - r, r * 2, r * 2))
+    SKIN.set()
+    oval.fill()
+
+
+def draw_arm(sx, sy, angle, phase, scale, side):
+    """Sprinter arm pump. phase=-1..1, side=+1/-1."""
+    ua = UPPER_ARM * scale
+    fa = FOREARM * scale
+    if scale < 0.1:
+        return
+
+    # Shoulder is on the side of the body (perpendicular to flee).
+    # Upper arm swings forward/back: forward = flee dir, back = opposite.
+    # At rest the arm points "down" (away from flee direction).
+    swing_angle = phase * 0.7
+    upper_a = angle + math.pi * 0.5 * side + swing_angle
+    elbow_x = sx + math.cos(upper_a) * ua
+    elbow_y = sy + math.sin(upper_a) * ua
+
+    # Forearm: always folds roughly back toward the body at ~90 deg.
+    # The fold direction flips with side so both arms bend inward.
+    forearm_a = upper_a - side * (1.3 + phase * 0.2)
+    hand_x = elbow_x + math.cos(forearm_a) * fa
+    hand_y = elbow_y + math.sin(forearm_a) * fa
+
+    _stroke_seg(sx, sy, elbow_x, elbow_y, 2.5)
+    _stroke_seg(elbow_x, elbow_y, hand_x, hand_y, 2.0)
+    _joint_dot(elbow_x, elbow_y, 1.8 * scale)
+
+    # Small fist
+    r = 2.5 * scale
     oval = NSBezierPath.bezierPathWithOvalInRect_(
-        NSMakeRect(x2 - r, y2 - r, r * 2, r * 2))
-    NSColor.whiteColor().set()
+        NSMakeRect(hand_x - r, hand_y - r, r * 2, r * 2))
+    SKIN.set()
     oval.fill()
     DARK.set()
-    oval.setLineWidth_(1.5)
+    oval.setLineWidth_(0.8)
     oval.stroke()
 
 
-def draw_eyes(cx, cy, angle):
+def draw_leg(hx, hy, angle, phase, scale):
+    """Running leg with high knee lift. phase=-1..1, scale=pop amount."""
+    th = THIGH * scale
+    sh = SHIN * scale
+    if scale < 0.1:
+        return
+
+    back = angle + math.pi
+
+    # Thigh swings between forward (flee dir) and back.
+    # phase +1 = knee up in front, phase -1 = leg extended behind (push off)
+    thigh_a = back - phase * 0.6
+    knee_x = hx + math.cos(thigh_a) * th
+    knee_y = hy + math.sin(thigh_a) * th
+
+    # Shin: when knee is up (phase>0), shin folds under (tight bend).
+    # When pushing off (phase<0), shin extends almost straight.
+    if phase > 0:
+        knee_bend = 1.8  # tight fold
+    else:
+        knee_bend = 0.4  # nearly straight push-off
+    shin_a = thigh_a + knee_bend
+    foot_x = knee_x + math.cos(shin_a) * sh
+    foot_y = knee_y + math.sin(shin_a) * sh
+
+    _stroke_seg(hx, hy, knee_x, knee_y, 3.0)
+    _stroke_seg(knee_x, knee_y, foot_x, foot_y, 2.5)
+    _joint_dot(knee_x, knee_y, 2.2 * scale)
+
+    # Shoe — oriented along the shin direction
+    shoe_len = 8 * scale
+    shoe_h = 5 * scale
+    # Shoe points along the shin
+    shoe_cx = foot_x + math.cos(shin_a) * shoe_len * 0.3
+    shoe_cy = foot_y + math.sin(shin_a) * shoe_len * 0.3
+    shoe = NSBezierPath.bezierPathWithOvalInRect_(
+        NSMakeRect(shoe_cx - shoe_len / 2, shoe_cy - shoe_h / 2, shoe_len, shoe_h))
+    SHOE.set()
+    shoe.fill()
+    DARK.set()
+    shoe.setLineWidth_(0.8)
+    shoe.stroke()
+
+
+def draw_eyes(cx, cy, angle, frame):
+    """Small panicked eyes at the leading edge of the icon."""
     perp = angle + math.pi / 2
     for side in (1, -1):
-        ex = cx + math.cos(angle) * 10 + math.cos(perp) * 8 * side
-        ey = cy + math.sin(angle) * 10 + math.sin(perp) * 8 * side
-        r = 6
+        # Position: at the front edge of the icon, close together
+        ex = cx + math.cos(angle) * (ICON_HALF + 2) + math.cos(perp) * 5 * side
+        ey = cy + math.sin(angle) * (ICON_HALF + 2) + math.sin(perp) * 5 * side
+
+        # White of eye
+        r = 4
         oval = NSBezierPath.bezierPathWithOvalInRect_(
             NSMakeRect(ex - r, ey - r, r * 2, r * 2))
-        NSColor.whiteColor().set()
+        WHITE.set()
         oval.fill()
         DARK.set()
-        oval.setLineWidth_(1.2)
+        oval.setLineWidth_(1.0)
         oval.stroke()
-        pr = 3
-        px = ex + math.cos(angle) * 2.5
-        py = ey + math.sin(angle) * 2.5
+
+        # Pupil — looking in flee direction
+        pr = 1.5
+        px = ex + math.cos(angle) * 1.5
+        py = ey + math.sin(angle) * 1.5
         pupil = NSBezierPath.bezierPathWithOvalInRect_(
             NSMakeRect(px - pr, py - pr, pr * 2, pr * 2))
         DARK.set()
         pupil.fill()
 
+    # Tiny open mouth
+    mx = cx + math.cos(angle) * (ICON_HALF + 1)
+    my = cy + math.sin(angle) * (ICON_HALF + 1)
+    mouth_r = 2
+    mouth = NSBezierPath.bezierPathWithOvalInRect_(
+        NSMakeRect(mx - mouth_r, my - mouth_r, mouth_r * 2, mouth_r * 2))
+    DARK.set()
+    mouth.fill()
+
 
 def draw_sweat(cx, cy, angle, frame):
-    if frame % 4 != 0:
+    if frame % 3 != 0:
         return
-    blue = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.3, 0.6, 1.0, 0.7)
+    blue = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.3, 0.65, 1.0, 0.8)
     perp = angle + math.pi / 2
-    for i in range(2):
-        off = (i - 0.5) * 18
-        dx = -math.cos(angle) * 38 + math.cos(perp) * off
-        dy = -math.sin(angle) * 38 + math.sin(perp) * off
+    # Sweat drops flying off behind the icon
+    for i in range(3):
+        t = (frame * 0.3 + i * 2.1) % 6.0
+        spread = (i - 1) * 15
+        dist = 30 + t * 4
+        dx = -math.cos(angle) * dist + math.cos(perp) * spread
+        dy = -math.sin(angle) * dist + math.sin(perp) * spread
         sx, sy = cx + dx, cy + dy
+        size = max(1, 4 - t * 0.5)
         drop = NSBezierPath.bezierPath()
-        drop.moveToPoint_((sx, sy - 4))
+        drop.moveToPoint_((sx, sy - size))
         drop.curveToPoint_controlPoint1_controlPoint2_(
-            (sx, sy + 4), (sx - 3, sy), (sx + 3, sy))
+            (sx, sy + size), (sx - size * 0.7, sy), (sx + size * 0.7, sy))
         blue.set()
         drop.fill()
+
+
+def draw_speed_lines(cx, cy, angle, frame):
+    """Motion lines trailing behind the icon."""
+    if frame % 2 != 0:
+        return
+    perp = angle + math.pi / 2
+    gray = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.5, 0.5, 0.5, 0.4)
+    for i in range(3):
+        spread = (i - 1) * 12
+        start_d = 35 + i * 5
+        length = 12 + i * 3
+        sx = cx - math.cos(angle) * start_d + math.cos(perp) * spread
+        sy = cy - math.sin(angle) * start_d + math.sin(perp) * spread
+        ex = sx - math.cos(angle) * length
+        ey = sy - math.sin(angle) * length
+        line = NSBezierPath.bezierPath()
+        line.moveToPoint_((sx, sy))
+        line.lineToPoint_((ex, ey))
+        line.setLineCapStyle_(1)
+        gray.set()
+        line.setLineWidth_(1.5)
+        line.stroke()
+
+
+def draw_pop_burst(cx, cy, pop_t):
+    """Little star/burst effect when limbs first pop out."""
+    if pop_t <= 0 or pop_t >= 0.8:
+        return
+    n_rays = 8
+    burst_r = 40 * pop_t
+    alpha = max(0, 1.0 - pop_t * 1.5)
+    color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1, 1, 0.6, alpha)
+    for i in range(n_rays):
+        a = i * math.pi * 2 / n_rays
+        inner = burst_r * 0.4
+        outer = burst_r
+        line = NSBezierPath.bezierPath()
+        line.moveToPoint_((cx + math.cos(a) * inner, cy + math.sin(a) * inner))
+        line.lineToPoint_((cx + math.cos(a) * outer, cy + math.sin(a) * outer))
+        line.setLineCapStyle_(1)
+        color.set()
+        line.setLineWidth_(2.0)
+        line.stroke()
 
 
 def draw_icon_limbs(ic):
@@ -230,28 +384,42 @@ def draw_icon_limbs(ic):
     cy = ic["y"] + ICON_HALF
     a = ic["angle"]
     f = ic["frame"]
-    swing = math.sin(f * math.pi / 2) * 0.7
+    pop = ic.get("pop_t", 1.0)
     perp = a + math.pi / 2
-
-    for side in (1, -1):
-        sx = cx + math.cos(perp) * ICON_HALF * 0.78 * side
-        sy = cy + math.sin(perp) * ICON_HALF * 0.78 * side
-        arm_a = a + swing * side
-        draw_limb(sx, sy,
-                  sx + math.cos(arm_a) * ARM_LEN,
-                  sy + math.sin(arm_a) * ARM_LEN, hand=True)
-
     back = a + math.pi
-    for side in (1, -1):
-        hx = cx + math.cos(back) * ICON_HALF * 0.45 + math.cos(perp) * ICON_HALF * 0.32 * side
-        hy = cy + math.sin(back) * ICON_HALF * 0.45 + math.sin(perp) * ICON_HALF * 0.32 * side
-        leg_a = back + swing * (-side) * 0.9
-        draw_limb(hx, hy,
-                  hx + math.cos(leg_a) * LEG_LEN,
-                  hy + math.sin(leg_a) * LEG_LEN, hand=False)
 
-    draw_eyes(cx, cy, a)
-    draw_sweat(cx, cy, a, f)
+    # Ease-out for pop scale
+    scale = 1.0 - (1.0 - pop) ** 2  # quadratic ease-out
+
+    # Running cycle: sin wave, frame 0-15
+    cycle = math.sin(f * math.pi / 4)  # -1 to 1 over 8 frames
+
+    # Pop burst effect
+    draw_pop_burst(cx, cy, pop)
+
+    # Speed lines (only after pop)
+    if pop >= 1.0:
+        draw_speed_lines(cx, cy, a, f)
+
+    # Right leg + left arm forward, then swap (opposite pairs)
+    # Legs
+    for side in (1, -1):
+        hx = cx + math.cos(back) * ICON_HALF * 0.4 + math.cos(perp) * ICON_HALF * 0.3 * side
+        hy = cy + math.sin(back) * ICON_HALF * 0.4 + math.sin(perp) * ICON_HALF * 0.3 * side
+        # side=1 (right leg) uses +cycle, side=-1 (left leg) uses -cycle
+        draw_leg(hx, hy, a, cycle * side, scale)
+
+    # Arms: opposite phase from same-side leg
+    for side in (1, -1):
+        sx = cx + math.cos(perp) * ICON_HALF * 0.75 * side
+        sy = cy + math.sin(perp) * ICON_HALF * 0.75 * side
+        draw_arm(sx, sy, a, -cycle * side, scale, side)
+
+    # Face (scale eyes too during pop)
+    if scale > 0.3:
+        draw_eyes(cx, cy, a, f)
+    if pop >= 1.0:
+        draw_sweat(cx, cy, a, f)
 
 
 # ── NSView ──────────────────────────────────────────────────────────────
@@ -291,8 +459,11 @@ class Controller(NSObject):
         if self is None:
             return None
 
-        global DARK
+        global DARK, SKIN, SHOE, WHITE
         DARK = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.15, 0.15, 0.15, 1)
+        SKIN = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.85, 0.72, 1)
+        SHOE = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.7, 0.15, 0.15, 1)
+        WHITE = NSColor.whiteColor()
 
         screen = NSScreen.mainScreen()
         sf = screen.frame()
@@ -366,16 +537,27 @@ class Controller(NSObject):
             dist = math.hypot(dx, dy)
 
             if dist < FLEE_RADIUS and dist > 1:
+                # Just entered radius — start pop animation
+                if not ic["was_fleeing"]:
+                    ic["pop_t"] = 0.0
                 ic["fleeing"] = True
-                ic["frame"] = (ic["frame"] + 1) % 8
+                ic["was_fleeing"] = True
+                ic["frame"] = (ic["frame"] + 1) % 16
                 nx, ny = dx / dist, dy / dist
                 ic["angle"] = math.atan2(ny, nx)
-                new_x = ic["x"] + nx * FLEE_SPEED
-                new_y = ic["y"] + ny * FLEE_SPEED
-                ic["x"] = max(10, min(new_x, self._sw - ICON_SIZE - 10))
-                ic["y"] = max(MENU_BAR_H, min(new_y, self._sh - ICON_SIZE - DOCK_H))
+
+                # Advance pop-in (limbs grow from 0→1 over ~8 frames)
+                if ic["pop_t"] < 1.0:
+                    ic["pop_t"] = min(1.0, ic["pop_t"] + 0.15)
+                else:
+                    # Only move once pop is done
+                    new_x = ic["x"] + nx * FLEE_SPEED
+                    new_y = ic["y"] + ny * FLEE_SPEED
+                    ic["x"] = max(10, min(new_x, self._sw - ICON_SIZE - 10))
+                    ic["y"] = max(MENU_BAR_H, min(new_y, self._sh - ICON_SIZE - DOCK_H))
             else:
                 ic["fleeing"] = False
+                ic["was_fleeing"] = False
                 ddx = ic["ox"] - ic["x"]
                 ddy = ic["oy"] - ic["y"]
                 d = math.hypot(ddx, ddy)
