@@ -7,6 +7,7 @@ just above Finder's desktop icons with our own movable versions.
 """
 
 import math
+import signal
 import sys
 import os
 
@@ -575,10 +576,16 @@ class Controller(NSObject):
 def main():
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(1)
-    Controller.alloc().init()
+    ctrl = Controller.alloc().init()
     print("Press Ctrl+C to stop.", flush=True)
     from PyObjCTools import AppHelper
-    AppHelper.runEventLoop(installInterrupt=True)
+
+    def _shutdown(*_args):
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+    AppHelper.runEventLoop()
 
 
 if __name__ == "__main__":

@@ -27,21 +27,39 @@ cd desktop-flee
 # Create venv and install dependencies
 python3 -m venv venv
 venv/bin/pip install pyobjc-framework-Cocoa pyobjc-framework-Quartz pyobjc-framework-ApplicationServices
-
-# Run
-venv/bin/python3 -u desktop_flee.py &
 ```
 
 ## Usage
 
+### One-off (manual)
+
+Run it in the foreground and stop it with Ctrl+C or `pkill`:
+
 **Start:**
 ```bash
-venv/bin/python3 -u desktop_flee.py &
+venv/bin/python3 -u desktop_flee.py
 ```
 
 **Stop:**
 ```bash
+# Ctrl+C in the terminal, or from another terminal:
 pkill -f desktop_flee.py
+```
+
+### Persistent (launchd)
+
+Use the included launchd agent to run at login and auto-restart if killed.
+
+**Install and start:**
+```bash
+cp com.samuel.desktop-flee.plist ~/Library/LaunchAgents/
+# Edit the plist to set the correct paths to your python and desktop_flee.py
+launchctl load ~/Library/LaunchAgents/com.samuel.desktop-flee.plist
+```
+
+**Stop:**
+```bash
+launchctl unload ~/Library/LaunchAgents/com.samuel.desktop-flee.plist
 ```
 
 ## Tuning
